@@ -5,7 +5,6 @@ import aiohttp
 import time
 import os
 from dotenv import load_dotenv
-import json
 import tweepy
 import requests
 
@@ -172,103 +171,46 @@ async def update_stats_channels(guild):
                 print(f"An error occurred while fetching Lasko users: {e}")
                 lasko_users_count = "N/A"
 
+            # AlphaSwap (TLS/USDT) — prices/volumes are integers in minor units
             try:
-                async with session.get("https://tradeogre.com/api/v1/ticker/tls-usdt") as response:
-                    text_data = await response.text()
-                    volume_data = json.loads(text_data)
-                    volume_tradeogre = float(volume_data["volume"])
-                    last_price_tradeogre = volume_data["price"]
-                    # Calculate price change manually using initialprice and current price
-                    initial_price = float(volume_data["initialprice"])
-                    current_price = float(volume_data["price"])
-                    price_change_tradeogre = ((current_price - initial_price) / initial_price) * 100
-            except Exception:
-                volume_tradeogre = 0  # Set volume to 0 if there's an error
-                last_price_tradeogre = "N/A"
-                price_change_tradeogre = "N/A"
+                async with session.get("https://swap.alphapool.tech/api/v1/markets/TLS/USDT") as response:
+                    alphaswap_data = await response.json()
+                    quote_decimals = 6
+                    last_price = int(alphaswap_data["last_trade"]) / (10 ** quote_decimals)
 
-            volume_coinmetro = "N/A"
-            last_price_coinmetro = "N/A"
-            price_change_coinmetro = "N/A"
+                price_change = "N/A"
+                last_volume = "N/A"
+                try:
+                    async with session.get(
+                        "https://swap.alphapool.tech/api/v1/markets/TLS/USDT/candles?period=3600&limit=24"
+                    ) as response:
+                        candles_data = await response.json()
+                        quote_decimals = int(candles_data.get("quote_decimals", 6))
+                        candles = candles_data.get("candles") or []
+                        if candles:
+                            open_24h = int(candles[0]["open"]) / (10 ** quote_decimals)
+                            if open_24h > 0:
+                                price_change = ((last_price - open_24h) / open_24h) * 100
+                            last_volume = sum(int(c["quote_volume"]) for c in candles) / (10 ** quote_decimals)
+                except Exception as e:
+                    print(f"Error fetching AlphaSwap candles: {e}")
 
-            try:
-                async with session.get("https://api.coinmetro.com/exchange/prices") as response:
-                    coinmetro_data = await response.json()
-                    # Find TLS price from latestPrices
-                    for price in coinmetro_data["latestPrices"]:
-                        if price["pair"] == "TLSUSDT":
-                            last_price_coinmetro = price["price"]
-                            break
-                    
-                    # Find TLS volume and price change from 24hInfo
-                    for info in coinmetro_data["24hInfo"]:
-                        if info["pair"] == "TLSUSDT":
-                            volume_coinmetro = float(info["v"]) * float(last_price_coinmetro)
-                            # Calculate price change using delta
-                            price_change_coinmetro = float(info["delta"]) * 100
-                            break
-            except Exception as e:
-                print(f"Error fetching CoinMetro data: {e}")
-                last_price_coinmetro = "N/A"
-                volume_coinmetro = "N/A" 
-                price_change_coinmetro = "N/A"
+                print("\nExchanges being used:")
+                print(f"AlphaSwap - Price: ${last_price:.6f}, Volume: ${float(last_volume):,.2f}" if last_volume != "N/A" else f"AlphaSwap - Price: ${last_price:.6f}, Volume: N/A")
+                print("Total exchanges used: 1\n")
 
-            # Calculate last price using volume-weighted average
-            available_exchanges = []
-            if last_price_coinmetro != "N/A" and volume_coinmetro != "N/A":
-                available_exchanges.append({
-                    "price": float(last_price_coinmetro),
-                    "volume": float(volume_coinmetro),
-                    "change": price_change_coinmetro
-                })
-            if last_price_tradeogre != "N/A" and volume_tradeogre != "N/A":
-                available_exchanges.append({
-                    "price": float(last_price_tradeogre),
-                    "volume": float(volume_tradeogre),
-                    "change": price_change_tradeogre
-                })
-
-            # Print which exchanges are being used
-            print("\nExchanges being used:")
-            if last_price_coinmetro != "N/A" and volume_coinmetro != "N/A":
-                print(f"CoinMetro - Price: ${float(last_price_coinmetro):.6f}, Volume: ${float(volume_coinmetro):,.2f}")
-            if last_price_tradeogre != "N/A" and volume_tradeogre != "N/A":
-                print(f"TradeOgre - Price: ${float(last_price_tradeogre):.6f}, Volume: ${float(volume_tradeogre):,.2f}")
-            print(f"Total exchanges used: {len(available_exchanges)}\n")
-
-            if available_exchanges:
-                total_volume = sum(exchange["volume"] for exchange in available_exchanges)
-                last_price = sum(exchange["price"] * (exchange["volume"] / total_volume) for exchange in available_exchanges)
-
-                # Calculate weighted average of price change if all available exchanges have price change data
-                available_changes = [exchange["change"] for exchange in available_exchanges if exchange["change"] != "N/A"]
-                if available_changes:
-                    price_change = sum(
-                        float(exchange["change"]) * (exchange["volume"] / total_volume)
-                        for exchange in available_exchanges
-                        if exchange["change"] != "N/A"
-                    )
+                if price_change != "N/A":
                     if price_change >= 0:
                         price_display = f"${last_price:.6f} (▲ +{price_change:.2f}% 24h)"
                     else:
                         price_display = f"${last_price:.6f} (▼ {price_change:.2f}% 24h)"
                 else:
                     price_display = f"${last_price:.6f}"
-            else:
-                last_price = "N/A"
-                price_display = "N/A"
-
-            # Calculate total volume
-            try:
-                if volume_coinmetro != "N/A" and volume_tradeogre != "N/A":
-                    last_volume = float(volume_coinmetro) + float(volume_tradeogre)
-                elif volume_coinmetro != "N/A":
-                    last_volume = float(volume_coinmetro)
-                else:
-                    last_volume = float(volume_tradeogre)
             except Exception as e:
-                print(f"Error calculating total volume: {e}")
+                print(f"Error fetching AlphaSwap data: {e}")
+                last_price = "N/A"
                 last_volume = "N/A"
+                price_display = "N/A"
 
         try:
             member_count = guild.member_count
